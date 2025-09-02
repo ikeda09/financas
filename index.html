@@ -1,0 +1,578 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=1024">
+    <title>Controle Financeiro Pessoal</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Incluindo Font Awesome para ícones -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css" xintegrity="sha512-DTOQO9RWCH3ppGqcWaEA1BIZOC6xxalwEsw9c2QQeAIftl+sSs+gG/Ezh7F2hJ7l0f2lR5JkM3t+E8B1+K3g==" crossorigin="anonymous" referrerpolicy="no-referrer" />
+    <!-- Incluindo Chart.js para o gráfico -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, GoogleAuthProvider, signInWithPopup, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, collection, addDoc, onSnapshot, query, where, deleteDoc, updateDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Firebase config is now hard-coded with the user's values
+        const firebaseConfig = {
+          apiKey: "AIzaSyBHVPfgYy4NzpEILtccFE0WlUinxyj9MIY",
+          authDomain: "gestao-financeira-46445.firebaseapp.com",
+          projectId: "gestao-financeira-46445",
+          storageBucket: "gestao-financeira-46445.firebasestorage.app",
+          messagingSenderId: "1074188264347",
+          appId: "1:1074188264347:web:fb5cbf5d4e16b9a289373e",
+          measurementId: "G-QDVTTEFEP9"
+        };
+        const appId = firebaseConfig.appId;
+
+        // Initialize Firebase
+        const app = initializeApp(firebaseConfig);
+        const db = getFirestore(app);
+        const auth = getAuth(app);
+        
+        let userId = null;
+        let transactionsData = [];
+        let pieChartInstance = null;
+        let isEditing = false; // Flag para rastrear o modo de edição
+
+        // Global state for transactions and filters
+        const state = {
+            transactions: [],
+            currentMonth: new Date().getMonth(),
+            currentYear: new Date().getFullYear(),
+        };
+
+        // UI elements
+        const elements = {
+            userIdDisplay: null,
+            googleLoginBtn: null,
+            exportBtn: null,
+            transactionsList: null,
+            totalBalanceEl: null,
+            totalIncomeEl: null,
+            totalExpenseEl: null,
+            monthSelect: null,
+            yearSelect: null,
+            transactionForm: null,
+            messageBox: null,
+            messageText: null,
+            pieChartCanvas: null,
+            chartContainer: null,
+            submitBtn: null,
+            editIdInput: null,
+        };
+
+        document.addEventListener('DOMContentLoaded', async () => {
+            elements.userIdDisplay = document.getElementById('user-id-display');
+            elements.googleLoginBtn = document.getElementById('google-login-btn');
+            elements.exportBtn = document.getElementById('export-btn');
+            elements.transactionsList = document.getElementById('transactions-list');
+            elements.totalBalanceEl = document.getElementById('total-balance');
+            elements.totalIncomeEl = document.getElementById('total-income');
+            elements.totalExpenseEl = document.getElementById('total-expense');
+            elements.monthSelect = document.getElementById('month-select');
+            elements.yearSelect = document.getElementById('year-select');
+            elements.transactionForm = document.getElementById('transaction-form');
+            elements.messageBox = document.getElementById('message-box');
+            elements.messageText = document.getElementById('message-text');
+            elements.pieChartCanvas = document.getElementById('pie-chart');
+            elements.chartContainer = document.getElementById('chart-container');
+            elements.submitBtn = document.getElementById('submit-btn');
+            elements.editIdInput = document.getElementById('edit-id');
+            
+            // Auth state listener
+            onAuthStateChanged(auth, (user) => {
+                if (user) {
+                    userId = user.uid;
+                    elements.googleLoginBtn.textContent = 'Logado';
+                    elements.googleLoginBtn.classList.remove('bg-gray-500');
+                    elements.googleLoginBtn.classList.add('bg-green-500');
+                    elements.googleLoginBtn.disabled = true;
+                    elements.userIdDisplay.textContent = `ID do Usuário: ${userId}`;
+                    elements.userIdDisplay.classList.remove('hidden');
+                    setupRealtimeDataListeners();
+                } else {
+                    userId = null;
+                    elements.googleLoginBtn.textContent = 'Entrar com Google';
+                    elements.googleLoginBtn.classList.remove('bg-green-500');
+                    elements.googleLoginBtn.classList.add('bg-gray-500');
+                    elements.googleLoginBtn.disabled = false;
+                    elements.userIdDisplay.textContent = 'ID do Usuário: Não Logado';
+                    elements.userIdDisplay.classList.add('hidden');
+                    // Clear data if logged out
+                    elements.totalBalanceEl.textContent = '¥ 0';
+                    elements.totalIncomeEl.textContent = '¥ 0';
+                    elements.totalExpenseEl.textContent = '¥ 0';
+                    elements.transactionsList.innerHTML = '<li class="text-center text-gray-500 py-4">Nenhum lançamento. Faça login para ver seus dados.</li>';
+                    if (pieChartInstance) {
+                        pieChartInstance.destroy();
+                        elements.chartContainer.innerHTML = '<div class="text-center text-gray-500 py-4">Faça login para ver o gráfico.</div>';
+                    }
+                }
+            });
+
+            // Event listeners
+            elements.googleLoginBtn.addEventListener('click', async () => {
+                const provider = new GoogleAuthProvider();
+                try {
+                    await signInWithPopup(auth, provider);
+                    showMessageBox('Login com Google realizado com sucesso!');
+                } catch (error) {
+                    console.error("Erro no login com Google:", error);
+                    showMessageBox('Erro no login com Google.');
+                }
+            });
+
+            elements.exportBtn.addEventListener('click', () => {
+                if (transactionsData.length === 0) {
+                    showMessageBox('Nenhum dado para exportar.');
+                    return;
+                }
+                exportDataToCSV(transactionsData);
+            });
+
+            elements.monthSelect.addEventListener('change', (e) => {
+                state.currentMonth = parseInt(e.target.value);
+                renderFilteredTransactions();
+            });
+
+            elements.yearSelect.addEventListener('change', (e) => {
+                state.currentYear = parseInt(e.target.value);
+                renderFilteredTransactions();
+            });
+
+            elements.transactionForm.addEventListener('submit', async (e) => {
+                e.preventDefault();
+                if (!userId) {
+                    showMessageBox('Por favor, faça login para adicionar um lançamento.');
+                    return;
+                }
+
+                const value = document.getElementById('value').value;
+                const category = document.getElementById('category').value;
+                const date = document.getElementById('date').value;
+                const description = document.getElementById('description').value;
+                const type = document.getElementById('type').value;
+                const transactionId = elements.editIdInput.value;
+
+                if (!value || !category || !date || !description || !type) {
+                    showMessageBox('Por favor, preencha todos os campos!');
+                    return;
+                }
+
+                const transaction = {
+                    value: parseFloat(value),
+                    category,
+                    date,
+                    description,
+                    type,
+                };
+
+                try {
+                    const transactionsCollection = collection(db, `artifacts/${appId}/users/${userId}/transactions`);
+                    if (isEditing && transactionId) {
+                        // Update existing transaction
+                        await updateDoc(doc(transactionsCollection, transactionId), transaction);
+                        showMessageBox('Lançamento atualizado com sucesso!');
+                    } else {
+                        // Add new transaction
+                        await addDoc(transactionsCollection, transaction);
+                        showMessageBox('Lançamento adicionado com sucesso!');
+                    }
+                    resetForm();
+                } catch (e) {
+                    console.error("Error adding/updating document: ", e);
+                    showMessageBox('Erro ao salvar lançamento.');
+                }
+            });
+
+            populateMonthSelect();
+            populateYearSelect();
+        });
+
+        // Function to show a temporary message box
+        function showMessageBox(message) {
+            elements.messageText.textContent = message;
+            elements.messageBox.classList.remove('hidden', 'opacity-0');
+            elements.messageBox.classList.add('opacity-100');
+            setTimeout(() => {
+                elements.messageBox.classList.remove('opacity-100');
+                elements.messageBox.classList.add('opacity-0');
+                setTimeout(() => {
+                    elements.messageBox.classList.add('hidden');
+                }, 500);
+            }, 3000);
+        }
+
+        function setupRealtimeDataListeners() {
+            if (!userId) {
+                console.error("User ID not available.");
+                return;
+            }
+
+            const transactionsCollection = collection(db, `artifacts/${appId}/users/${userId}/transactions`);
+            onSnapshot(
+                transactionsCollection,
+                (snapshot) => {
+                    transactionsData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                    renderFilteredTransactions();
+                },
+                (error) => {
+                    console.error("Error fetching transactions:", error);
+                }
+            );
+        }
+
+        // Renders filtered transactions and updates financial summaries
+        function renderFilteredTransactions() {
+            const { currentMonth, currentYear } = state;
+            
+            const filteredDocs = transactionsData.filter(doc => {
+                const docDate = new Date(doc.date);
+                return docDate.getMonth() === currentMonth && docDate.getFullYear() === currentYear;
+            });
+
+            elements.transactionsList.innerHTML = '';
+            let totalIncome = 0;
+            let totalExpense = 0;
+            const expensesByCategory = {};
+
+            if (filteredDocs.length === 0) {
+                elements.transactionsList.innerHTML = '<li class="text-center text-gray-500 py-4">Nenhum lançamento encontrado para este mês.</li>';
+            }
+
+            filteredDocs.forEach(doc => {
+                const data = doc;
+                const value = parseFloat(data.value);
+                const type = data.type;
+
+                if (type === 'income') {
+                    totalIncome += value;
+                } else if (type === 'expense') {
+                    totalExpense += value;
+                    if (!expensesByCategory[data.category]) {
+                        expensesByCategory[data.category] = 0;
+                    }
+                    expensesByCategory[data.category] += value;
+                }
+
+                const li = document.createElement('li');
+                li.className = 'bg-white p-4 rounded-lg shadow-sm flex justify-between items-center mb-2';
+                li.innerHTML = `
+                    <div class="flex-grow">
+                        <div class="text-sm font-semibold text-gray-800">${data.description}</div>
+                        <div class="text-xs text-gray-500">${new Date(data.date).toLocaleDateString()} - ${data.category}</div>
+                    </div>
+                    <div class="flex items-center space-x-2">
+                        <span class="${type === 'income' ? 'text-green-500' : 'text-red-500'} font-bold">
+                            ${type === 'income' ? '+' : '-'} ¥${value.toFixed(0)}
+                        </span>
+                        <button data-id="${data.id}" class="edit-btn text-blue-500 hover:text-blue-700 transition-colors duration-200">
+                            <i class="fas fa-pencil-alt"></i>
+                        </button>
+                        <button data-id="${data.id}" class="delete-btn text-red-500 hover:text-red-700 transition-colors duration-200">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                                <path fill-rule="evenodd" d="M9 2a1 1 0 00-.894.553L7.382 4H4a1 1 0 000 2v10a2 2 0 002 2h8a2 2 0 002-2V6a1 1 0 100-2h-3.382l-.724-1.447A1 1 0 0011 2H9zM7 8a1 1 0 012 0v6a1 1 0 11-2 0V8zm6 0a1 1 0 012 0v6a1 1 0 11-2 0V8z" clip-rule="evenodd" />
+                            </svg>
+                        </button>
+                    </div>
+                `;
+                elements.transactionsList.appendChild(li);
+            });
+
+            const totalBalance = totalIncome - totalExpense;
+            elements.totalBalanceEl.textContent = `¥${totalBalance.toFixed(0)}`;
+            elements.totalIncomeEl.textContent = `¥${totalIncome.toFixed(0)}`;
+            elements.totalExpenseEl.textContent = `¥${totalExpense.toFixed(0)}`;
+            elements.totalBalanceEl.className = `text-2xl font-bold ${totalBalance >= 0 ? 'text-green-400' : 'text-red-400'}`;
+            document.getElementById('final-balance').textContent = `¥${totalBalance.toFixed(0)}`;
+
+            // Add delete and edit button functionality
+            document.querySelectorAll('.delete-btn').forEach(button => {
+                button.addEventListener('click', async (e) => {
+                    const transactionId = e.currentTarget.dataset.id;
+                    try {
+                        const transactionsCollection = collection(db, `artifacts/${appId}/users/${userId}/transactions`);
+                        await deleteDoc(doc(transactionsCollection, transactionId));
+                        showMessageBox('Lançamento excluído com sucesso!');
+                    } catch (error) { // Fixed: Removed the unexpected '=>'
+                        console.error("Error removing document:", error);
+                        showMessageBox('Erro ao excluir lançamento.');
+                    }
+                });
+            });
+
+            document.querySelectorAll('.edit-btn').forEach(button => {
+                button.addEventListener('click', (e) => {
+                    const transactionId = e.currentTarget.dataset.id;
+                    editTransaction(transactionId);
+                });
+            });
+
+            renderPieChart(expensesByCategory);
+        }
+
+        // Handles the edit button click
+        function editTransaction(transactionId) {
+            const transaction = transactionsData.find(t => t.id === transactionId);
+            if (!transaction) {
+                showMessageBox('Lançamento não encontrado para edição.');
+                return;
+            }
+
+            // Populate form with transaction data
+            document.getElementById('value').value = transaction.value;
+            document.getElementById('category').value = transaction.category;
+            document.getElementById('date').value = transaction.date;
+            document.getElementById('description').value = transaction.description;
+            document.getElementById('type').value = transaction.type;
+
+            // Update form state to editing mode
+            isEditing = true;
+            elements.editIdInput.value = transactionId;
+            elements.submitBtn.textContent = 'Salvar Edição';
+            showMessageBox('Modo de edição ativado.');
+        }
+
+        // Resets the form and editing state
+        function resetForm() {
+            elements.transactionForm.reset();
+            isEditing = false;
+            elements.editIdInput.value = '';
+            elements.submitBtn.textContent = 'Adicionar';
+        }
+
+        // Renders the pie chart based on expenses by category
+        function renderPieChart(expensesByCategory) {
+            if (pieChartInstance) {
+                pieChartInstance.destroy();
+            }
+
+            const categories = Object.keys(expensesByCategory);
+            const values = Object.values(expensesByCategory);
+
+            if (categories.length === 0) {
+                elements.chartContainer.innerHTML = '<div class="text-center text-gray-500 py-4">Nenhum gasto registrado para este mês.</div>';
+                return;
+            }
+
+            elements.chartContainer.innerHTML = '<canvas id="pie-chart" class="w-full"></canvas>';
+            elements.pieChartCanvas = document.getElementById('pie-chart');
+            const ctx = elements.pieChartCanvas.getContext('2d');
+
+            const backgroundColors = [
+                '#3498db', '#e74c3c', '#2ecc71', '#f1c40f', '#9b59b6',
+                '#34495e', '#1abc9c', '#f39c12', '#c0392b', '#7f8c8d'
+            ];
+
+            pieChartInstance = new Chart(ctx, {
+                type: 'pie',
+                data: {
+                    labels: categories,
+                    datasets: [{
+                        data: values,
+                        backgroundColor: backgroundColors,
+                        hoverOffset: 4,
+                    }],
+                },
+                options: {
+                    responsive: true,
+                    plugins: {
+                        legend: {
+                            position: 'top',
+                        },
+                        title: {
+                            display: true,
+                            text: 'Despesas por Categoria',
+                            font: {
+                                size: 18,
+                            }
+                        }
+                    }
+                },
+            });
+        }
+
+        // Populates the month select dropdown
+        function populateMonthSelect() {
+            const months = ['Janeiro', 'Fevereiro', 'Março', 'Abril', 'Maio', 'Junho', 'Julho', 'Agosto', 'Setembro', 'Outubro', 'Novembro', 'Dezembro'];
+            months.forEach((month, index) => {
+                const option = document.createElement('option');
+                option.value = index;
+                option.textContent = month;
+                elements.monthSelect.appendChild(option);
+            });
+            elements.monthSelect.value = state.currentMonth;
+        }
+
+        // Populates the year select dropdown
+        function populateYearSelect() {
+            const startYear = 2023;
+            const endYear = new Date().getFullYear() + 1;
+            for (let year = startYear; year <= endYear; year++) {
+                const option = document.createElement('option');
+                option.value = year;
+                option.textContent = year;
+                elements.yearSelect.appendChild(option);
+            }
+            elements.yearSelect.value = state.currentYear;
+        }
+
+        // Exports data to a CSV file and provides instructions for Google Sheets
+        function exportDataToCSV(data) {
+            if (!data || data.length === 0) return;
+
+            // Define the headers in Portuguese
+            const header = ["data", "descricao", "categoria", "tipo", "valor"];
+            const csvData = data.map(row => [
+                `"${row.date}"`,
+                `"${row.description}"`,
+                `"${row.category}"`,
+                `"${row.type === 'income' ? 'Entrada' : 'Saída'}"`,
+                `"${row.value.toFixed(0)}"`
+            ]).join('\n');
+
+            const csv = `${header.join(',')}\n${csvData}`;
+            const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            link.setAttribute('href', url);
+            link.setAttribute('download', 'lancamentos_financeiros.csv');
+            link.style.visibility = 'hidden';
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            
+            showMessageBox('Download do arquivo de lançamentos iniciado.');
+            setTimeout(() => {
+                showMessageBox('Para usar no Google Planilhas, vá em "Arquivo > Importar > Fazer upload" e selecione o arquivo baixado.');
+            }, 3500); // Show this message after the first one disappears
+        }
+    </script>
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f3f4f6;
+        }
+    </style>
+</head>
+<body class="bg-gray-100 font-sans leading-normal tracking-normal h-screen flex">
+
+    <!-- Message Box -->
+    <div id="message-box" class="fixed bottom-4 right-4 bg-gray-900 text-white px-6 py-3 rounded-full shadow-lg z-50 transition-opacity duration-500 opacity-0 hidden">
+        <span id="message-text"></span>
+    </div>
+
+    <!-- Sidebar -->
+    <div class="w-64 bg-blue-900 text-orange-400 flex flex-col items-center p-6 shadow-2xl">
+        <div class="w-full text-center mb-8">
+            <!-- New logo from the provided URL -->
+            <img src="https://i.imgur.com/ReaMi2P.png" alt="Logo do Controle Financeiro" class="mx-auto w-48 h-48 mb-2">
+        </div>
+
+        <div class="w-full text-center p-4 bg-blue-800 rounded-lg mb-4">
+            <div class="text-sm font-light text-gray-300">Saldo Atual</div>
+            <div id="total-balance" class="text-2xl font-bold mt-1 text-green-400">¥0</div>
+        </div>
+
+        <nav class="w-full">
+            <ul class="space-y-4">
+                <li><button class="w-full text-left p-3 rounded-md bg-blue-700 hover:bg-blue-600 transition-colors duration-200">Lançamentos</button></li>
+                <li><button id="export-btn" class="w-full text-left p-3 rounded-md bg-blue-700 hover:bg-blue-600 transition-colors duration-200">Exportar para Planilhas</button></li>
+                <li><button id="google-login-btn" class="w-full text-left p-3 rounded-md bg-gray-500 hover:bg-gray-400 transition-colors duration-200 text-white font-semibold">Entrar com Google</button></li>
+            </ul>
+        </nav>
+        
+        <!-- Moved content to the bottom of the sidebar -->
+        <div class="mt-8 text-center w-full mx-auto">
+            <div class="text-3xl font-bold mb-2">Finanças</div>
+            <div class="text-sm text-gray-400">Seu controle financeiro simplificado</div>
+            <div class="text-sm text-orange-400 mt-2">desenvolvido pelo canal de Youtube Investimentos no Japão por Denis Ikeda</div>
+        </div>
+        <div id="user-id-display" class="mt-auto text-xs text-gray-400 p-2 bg-blue-800 rounded-lg hidden">ID do Usuário: Não Logado</div>
+    </div>
+
+    <!-- Main Content -->
+    <div class="flex-1 p-8 overflow-y-auto">
+        
+        <header class="flex justify-between items-center mb-8">
+            <h1 class="text-3xl font-bold text-gray-800">Seu Dashboard</h1>
+        </header>
+
+        <!-- Financial Summary -->
+        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 mb-8">
+            <div class="bg-blue-500 text-white p-6 rounded-xl shadow-lg">
+                <div class="text-sm font-medium">Total de Entradas</div>
+                <div id="total-income" class="text-2xl font-bold mt-2">¥0</div>
+            </div>
+            <div class="bg-red-500 text-white p-6 rounded-xl shadow-lg">
+                <div class="text-sm font-medium">Total de Saídas</div>
+                <div id="total-expense" class="text-2xl font-bold mt-2">¥0</div>
+            </div>
+            <div class="bg-white text-gray-800 p-6 rounded-xl shadow-lg">
+                <div class="text-sm font-medium">Saldo Final</div>
+                <div id="final-balance" class="text-2xl font-bold mt-2">¥0</div>
+            </div>
+        </div>
+
+        <!-- Add Transaction Form -->
+        <div class="bg-white p-6 rounded-xl shadow-lg mb-8">
+            <h2 class="text-2xl font-semibold text-gray-800 mb-4">Adicionar Novo Lançamento</h2>
+            <form id="transaction-form" class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <input type="hidden" id="edit-id">
+                <div>
+                    <label for="value" class="block text-sm font-medium text-gray-700">Valor</label>
+                    <input type="number" step="0.01" id="value" name="value" placeholder="¥100" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm p-2" required>
+                </div>
+                <div>
+                    <label for="category" class="block text-sm font-medium text-gray-700">Categoria</label>
+                    <input type="text" id="category" name="category" placeholder="Alimentação" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm p-2" required>
+                </div>
+                <div>
+                    <label for="date" class="block text-sm font-medium text-gray-700">Data</label>
+                    <input type="date" id="date" name="date" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm p-2" required>
+                </div>
+                <div>
+                    <label for="description" class="block text-sm font-medium text-gray-700">Descrição</label>
+                    <input type="text" id="description" name="description" placeholder="Compra no supermercado" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm p-2" required>
+                </div>
+                <div class="md:col-span-2">
+                    <label for="type" class="block text-sm font-medium text-gray-700">Tipo</label>
+                    <select id="type" name="type" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm p-2" required>
+                        <option value="">Selecione o tipo</option>
+                        <option value="income">Entrada</option>
+                        <option value="expense">Saída</option>
+                    </select>
+                </div>
+                <div class="md:col-span-2 text-right">
+                    <button id="submit-btn" type="submit" class="bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-6 rounded-full transition-colors duration-200 shadow-lg">
+                        Adicionar
+                    </button>
+                </div>
+            </form>
+        </div>
+        
+        <!-- Pie Chart -->
+        <div id="chart-container" class="bg-white p-6 rounded-xl shadow-lg mb-8">
+            <h2 class="text-2xl font-semibold text-gray-800 mb-4">Gráfico de Despesas</h2>
+            <canvas id="pie-chart"></canvas>
+        </div>
+
+        <!-- Monthly View & Transactions List -->
+        <div class="bg-white p-6 rounded-xl shadow-lg">
+            <div class="flex flex-col md:flex-row justify-between items-start md:items-center mb-4 space-y-4 md:space-y-0">
+                <h2 class="text-2xl font-semibold text-gray-800">Lançamentos por Mês</h2>
+                <div class="flex space-x-2">
+                    <select id="month-select" class="rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 text-sm p-2"></select>
+                    <select id="year-select" class="rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 text-sm p-2"></select>
+                </div>
+            </div>
+            <ul id="transactions-list">
+                <!-- Transactions will be dynamically added here -->
+            </ul>
+        </div>
+    </div>
+</body>
+</html>
+
